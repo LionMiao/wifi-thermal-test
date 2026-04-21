@@ -13,3 +13,4 @@ __pycache__/
 thermal_test_*.png
 thermal_test_*.csv
 *.log
+*.apk
