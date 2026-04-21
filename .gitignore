@@ -1,0 +1,15 @@
+# Android build
+android-app/.gradle/
+android-app/app/build/
+android-app/local.properties
+*.iml
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Test results (generated, not committed)
+thermal_test_*.png
+thermal_test_*.csv
+*.log
