@@ -3,23 +3,22 @@ package com.wifithermal;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
 import android.widget.*;
 import androidx.appcompat.app.AppCompatActivity;
 import com.wifithermal.ChartView.DataPoint;
 import java.io.*;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Locale;
-import java.util.regex.*;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String TAG = "MainActivity";
 
-    // iperf3 server listens on 5201 by default; we keep 5555 for our control (temp push)
-    static final int IPERF_PORT    = 5201;
+    static final int DATA_PORT     = 5556;
     static final int CONTROL_PORT  = 5555;
-    static final int PARALLEL      = 8;
+    static final int NUM_STREAMS   = 8;
+    static final int BUF_SIZE      = 1024 * 1024; // 1MB
     static final int SMOOTH_WINDOW = 3;
 
     private EditText etIp, etPort, etDuration;
@@ -29,28 +28,21 @@ public class MainActivity extends AppCompatActivity {
     private Handler handler = new Handler(Looper.getMainLooper());
 
     private volatile boolean running = false;
-    private IperfRunner iperfRunner;
     private Socket ctrlSocket;
-    private long startTime;
-    private int durationSec;
+    private final List<Socket> dataSockets = new ArrayList<>();
 
-    private final ArrayDeque<Double> rateWindow = new ArrayDeque<>();
+    private volatile long totalSent = 0, totalRecv = 0;
+    private long lastSent = 0, lastRecv = 0;
+    private long startTime = 0;
+    private int durationSec = 0;
 
-    // iperf3 interval line pattern:
-    // [SUM]   0.00-1.00   sec  xxx MBytes  xxx Mbits/sec
-    private static final Pattern INTERVAL_PATTERN = Pattern.compile(
-        "\\[SUM\\].*?(\\d+\\.\\d+)-(\\d+\\.\\d+)\\s+sec.*?(\\d+\\.\\d+)\\s+Mbits/sec"
-    );
-    // single stream (no SUM) when parallel=1
-    private static final Pattern SINGLE_PATTERN = Pattern.compile(
-        "\\[\\s*\\d+\\].*?(\\d+\\.\\d+)-(\\d+\\.\\d+)\\s+sec.*?(\\d+\\.\\d+)\\s+Mbits/sec.*?sender"
-    );
+    private final ArrayDeque<Double> txWindow = new ArrayDeque<>();
+    private final ArrayDeque<Double> rxWindow = new ArrayDeque<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-
         etIp       = findViewById(R.id.etIp);
         etPort     = findViewById(R.id.etPort);
         etDuration = findViewById(R.id.etDuration);
@@ -63,153 +55,153 @@ public class MainActivity extends AppCompatActivity {
         tvTemp0    = findViewById(R.id.tvTemp0);
         tvTemp1    = findViewById(R.id.tvTemp1);
         chartView  = findViewById(R.id.chartView);
-
-        iperfRunner = new IperfRunner(this);
-        try {
-            
-            if (iperfRunner.isAvailable()) tvStatus.setText("Ready"); else tvStatus.setText("iperf3 not found: " + iperfRunner.getBinaryPath());
-        } catch (Exception e) {
-        }
-
-        btnStart.setOnClickListener(v -> {
-            if (!running) startTest();
-            else stopTest();
-        });
+        tvStatus.setText("Ready");
+        btnStart.setOnClickListener(v -> { if (!running) startTest(); else stopTest(); });
     }
 
     private void startTest() {
-        String ip = etIp.getText().toString().trim();
-        durationSec = Integer.parseInt(etDuration.getText().toString().trim()) * 60;
+        String ip     = etIp.getText().toString().trim();
+        int ctrlPort  = Integer.parseInt(etPort.getText().toString().trim());
+        durationSec   = Integer.parseInt(etDuration.getText().toString().trim()) * 60;
 
         running = true;
-        rateWindow.clear();
-        chartView.clear();
-        chartView.setDuration(durationSec);
+        totalSent = 0; totalRecv = 0; lastSent = 0; lastRecv = 0;
+        txWindow.clear(); rxWindow.clear();
+        chartView.clear(); chartView.setDuration(durationSec);
         startTime = System.currentTimeMillis();
         btnStart.setText("Stop");
         tvStatus.setText("Connecting...");
 
-        // Control connection for temperature push
         new Thread(() -> {
             try {
-                ctrlSocket = new Socket(ip, CONTROL_PORT);
+                // ── 控制连接 ──
+                ctrlSocket = new Socket(ip, ctrlPort);
                 ctrlSocket.setTcpNoDelay(true);
                 OutputStream ctrlOut = ctrlSocket.getOutputStream();
                 BufferedReader ctrlIn = new BufferedReader(
                     new InputStreamReader(ctrlSocket.getInputStream()));
 
-                // Tell server test duration (for logging/chart on server side)
                 ctrlOut.write(("START:" + durationSec + "\n").getBytes());
                 ctrlOut.flush();
                 String resp = ctrlIn.readLine();
-                Log.i(TAG, "Control resp: " + resp);
+                if (!"OK".equals(resp)) { updateStatus("Handshake fail: " + resp); running=false; return; }
 
-                // Read STAT lines: STAT:elapsed:t0:t1:tx:rx
+                updateStatus("Opening streams...");
+
+                // ── 数据流连接 ──
+                synchronized (dataSockets) { dataSockets.clear(); }
+                for (int i = 0; i < NUM_STREAMS; i++) {
+                    Socket ds = new Socket(ip, DATA_PORT);
+                    ds.setSendBufferSize(4 * 1024 * 1024);
+                    ds.setReceiveBufferSize(4 * 1024 * 1024);
+                    ds.setTcpNoDelay(true);
+                    synchronized (dataSockets) { dataSockets.add(ds); }
+                }
+
+                updateStatus("Running...");
+
+                // ── 每条流独立 sender + receiver 线程 ──
+                for (Socket ds : new ArrayList<>(dataSockets)) {
+                    final Socket fds = ds;
+                    // sender
+                    new Thread(() -> {
+                        byte[] buf = new byte[BUF_SIZE];
+                        try {
+                            OutputStream out = fds.getOutputStream();
+                            while (running) {
+                                out.write(buf);
+                                totalSent += BUF_SIZE;
+                            }
+                        } catch (Exception ignored) {}
+                    }, "sender").start();
+                    // receiver
+                    new Thread(() -> {
+                        byte[] buf = new byte[BUF_SIZE];
+                        try {
+                            InputStream in = fds.getInputStream();
+                            while (running) {
+                                int n = in.read(buf);
+                                if (n <= 0) break;
+                                totalRecv += n;
+                            }
+                        } catch (Exception ignored) {}
+                    }, "receiver").start();
+                }
+
+                // ── 本地 UI 速率更新（每秒，滑动平均）──
+                new Thread(() -> {
+                    while (running) {
+                        try { Thread.sleep(1000); } catch (Exception e) { break; }
+                        long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+                        long s = totalSent, r = totalRecv;
+                        double txMbps = (s - lastSent) * 8.0 / 1_000_000.0;
+                        double rxMbps = (r - lastRecv) * 8.0 / 1_000_000.0;
+                        lastSent = s; lastRecv = r;
+                        txWindow.addLast(txMbps); if (txWindow.size()>SMOOTH_WINDOW) txWindow.removeFirst();
+                        rxWindow.addLast(rxMbps); if (rxWindow.size()>SMOOTH_WINDOW) rxWindow.removeFirst();
+                        double sTx=0, sRx=0;
+                        for (double v:txWindow) sTx+=v; sTx/=txWindow.size();
+                        for (double v:rxWindow) sRx+=v; sRx/=rxWindow.size();
+                        final double fTx=sTx, fRx=sRx, fTot=sTx+sRx;
+                        final String tStr=String.format(Locale.US,"%02d:%02d",elapsed/60,elapsed%60);
+                        handler.post(()->{
+                            tvTime.setText(tStr);
+                            tvTx.setText(String.format(Locale.US,"TX: %.0f Mbps",fTx));
+                            tvRx.setText(String.format(Locale.US,"RX: %.0f Mbps",fRx));
+                            tvTotal.setText(String.format(Locale.US,"Total: %.0f Mbps",fTot));
+                        });
+                        chartView.updateLastRate((System.currentTimeMillis()-startTime)/1000f, (float)fTot);
+                        if (durationSec>0 && elapsed>=durationSec) { running=false; break; }
+                    }
+                }, "ui-updater").start();
+
+                // ── 读服务端温度 STAT 行 ──
                 String line;
                 while (running && (line = ctrlIn.readLine()) != null) {
-                    if (line.startsWith("END")) break;
+                    if (line.startsWith("END")) { running=false; break; }
                     if (!line.startsWith("STAT:")) continue;
                     try {
                         String[] p = line.split(":");
                         float t0 = Float.parseFloat(p[2]);
                         float t1 = Float.parseFloat(p[3]);
-                        final float ft0 = t0, ft1 = t1;
-                        handler.post(() -> {
-                            tvTemp0.setText(String.format(Locale.US, "phy0: %.1f°C", ft0));
-                            tvTemp1.setText(String.format(Locale.US, "phy1: %.1f°C", ft1));
+                        float elapsed = Float.parseFloat(p[1]);
+                        final float ft0=t0, ft1=t1, fe=elapsed;
+                        handler.post(()->{
+                            tvTemp0.setText(String.format(Locale.US,"phy0: %.1f°C",ft0));
+                            tvTemp1.setText(String.format(Locale.US,"phy1: %.1f°C",ft1));
                         });
+                        chartView.updateLastTemp(fe, t0, t1);
                     } catch (Exception ignored) {}
                 }
+
+                updateStatus("Test complete!");
             } catch (Exception e) {
-                Log.w(TAG, "Control socket: " + e.getMessage());
+                updateStatus("Error: " + e.getMessage());
+            } finally {
+                running = false;
+                cleanup();
+                handler.post(() -> btnStart.setText("Start Test"));
             }
         }, "ctrl-thread").start();
-
-        // Time updater
-        new Thread(() -> {
-            while (running) {
-                try { Thread.sleep(1000); } catch (Exception e) { break; }
-                long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-                long min = elapsed / 60, sec = elapsed % 60;
-                final String t = String.format(Locale.US, "%02d:%02d", min, sec);
-                handler.post(() -> tvTime.setText(t));
-                if (durationSec > 0 && elapsed >= durationSec + 5) running = false;
-            }
-        }, "time-updater").start();
-
-        // Run iperf3
-        iperfRunner.runClient(ip, IPERF_PORT, durationSec, PARALLEL,
-            new IperfRunner.LineCallback() {
-                @Override
-                public void onLine(String line) {
-                    Log.d(TAG, "iperf3: " + line);
-                    parseAndDisplay(line);
-                }
-                @Override
-                public void onDone(int exitCode) {
-                    running = false;
-                    handler.post(() -> {
-                        tvStatus.setText(exitCode == 0 ? "Test complete!" : "Done (code=" + exitCode + ")");
-                        btnStart.setText("Start Test");
-                    });
-                    try { if (ctrlSocket != null) ctrlSocket.close(); } catch (Exception ignored) {}
-                }
-            });
-
-        updateStatus("Running...");
-    }
-
-    private void parseAndDisplay(String line) {
-        // Match interval summary line (SUM for multi-stream)
-        Matcher m = INTERVAL_PATTERN.matcher(line);
-        if (!m.find()) return;
-
-        try {
-            float t1 = Float.parseFloat(m.group(1));
-            float t2 = Float.parseFloat(m.group(2));
-            // Only process 1-second intervals, skip the final summary
-            if (t2 - t1 > 1.5f) return;
-
-            double mbps = Double.parseDouble(m.group(3));
-
-            // Sliding average
-            rateWindow.addLast(mbps);
-            if (rateWindow.size() > SMOOTH_WINDOW) rateWindow.removeFirst();
-            double smooth = rateWindow.stream().mapToDouble(d -> d).average().orElse(0);
-
-            float elapsed = (System.currentTimeMillis() - startTime) / 1000f;
-            final double fSmooth = smooth;
-            final float fElapsed = elapsed;
-
-            handler.post(() -> {
-                tvTx.setText(String.format(Locale.US, "TX: %.0f Mbps", fSmooth));
-                tvRx.setText("RX: --");
-                tvTotal.setText(String.format(Locale.US, "Total: %.0f Mbps", fSmooth));
-            });
-
-            // Add to chart using server-side temp (chart updates when STAT arrives)
-            // We update rate here, temp is updated separately from control socket
-            chartView.updateLastRate(fElapsed, (float) fSmooth);
-        } catch (Exception e) {
-            Log.w(TAG, "Parse error: " + e.getMessage() + " line=" + line);
-        }
     }
 
     private void stopTest() {
         running = false;
-        iperfRunner.stop();
-        try { if (ctrlSocket != null) ctrlSocket.close(); } catch (Exception ignored) {}
+        cleanup();
         btnStart.setText("Start Test");
         tvStatus.setText("Stopped");
     }
 
-    private void updateStatus(String s) {
-        handler.post(() -> tvStatus.setText(s));
+    private void cleanup() {
+        synchronized (dataSockets) {
+            for (Socket s : dataSockets) { try { s.close(); } catch (Exception ignored) {} }
+            dataSockets.clear();
+        }
+        try { if (ctrlSocket!=null) ctrlSocket.close(); } catch (Exception ignored) {}
     }
 
+    private void updateStatus(String s) { handler.post(()->tvStatus.setText(s)); }
+
     @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        stopTest();
-    }
+    protected void onDestroy() { super.onDestroy(); stopTest(); }
 }
