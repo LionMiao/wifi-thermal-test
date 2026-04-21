@@ -3,105 +3,171 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="24dp"
-    android:gravity="center_horizontal">
+    android:padding="16dp"
+    android:background="#1a1a2e">
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="WiFi Thermal Test"
-        android:textSize="24sp"
+        android:textSize="20sp"
         android:textStyle="bold"
-        android:layout_marginBottom="24dp"/>
+        android:textColor="#ffffff"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginBottom="12dp"/>
 
-    <com.google.android.material.textfield.TextInputLayout
+    <!-- Config row -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Server IP"
-        android:layout_marginBottom="12dp">
-        <com.google.android.material.textfield.TextInputEditText
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
+
+        <EditText
             android:id="@+id/etIp"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="3"
+            android:hint="Server IP"
             android:text="192.168.10.178"
-            android:inputType="text"/>
-    </com.google.android.material.textfield.TextInputLayout>
+            android:textColor="#ffffff"
+            android:textColorHint="#888888"
+            android:inputType="text"
+            android:backgroundTint="#444466"
+            android:paddingHorizontal="8dp"
+            android:layout_marginEnd="6dp"/>
 
-    <com.google.android.material.textfield.TextInputLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Port"
-        android:layout_marginBottom="12dp">
-        <com.google.android.material.textfield.TextInputEditText
+        <EditText
             android:id="@+id/etPort"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1.2"
+            android:hint="Port"
             android:text="5555"
-            android:inputType="number"/>
-    </com.google.android.material.textfield.TextInputLayout>
+            android:textColor="#ffffff"
+            android:textColorHint="#888888"
+            android:inputType="number"
+            android:backgroundTint="#444466"
+            android:paddingHorizontal="8dp"
+            android:layout_marginEnd="6dp"/>
 
-    <com.google.android.material.textfield.TextInputLayout
+        <EditText
+            android:id="@+id/etDuration"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.2"
+            android:hint="Min"
+            android:text="30"
+            android:textColor="#ffffff"
+            android:textColorHint="#888888"
+            android:inputType="number"
+            android:backgroundTint="#444466"
+            android:paddingHorizontal="8dp"/>
+    </LinearLayout>
+
+    <!-- Stats row -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Duration (minutes)"
-        android:layout_marginBottom="24dp">
-        <com.google.android.material.textfield.TextInputEditText
-            android:id="@+id/etDuration"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="30"
-            android:inputType="number"/>
-    </com.google.android.material.textfield.TextInputLayout>
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
 
-    <com.google.android.material.button.MaterialButton
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Ready"
+            android:textColor="#aaaaaa"
+            android:textSize="13sp"/>
+
+        <TextView
+            android:id="@+id/tvTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="00:00"
+            android:textColor="#ffffff"
+            android:textSize="14sp"
+            android:textStyle="bold"/>
+    </LinearLayout>
+
+    <!-- Speed row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
+
+        <TextView
+            android:id="@+id/tvTx"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="TX: -- Mbps"
+            android:textColor="#4fc3f7"
+            android:textSize="14sp"/>
+
+        <TextView
+            android:id="@+id/tvRx"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="RX: -- Mbps"
+            android:textColor="#81c784"
+            android:textSize="14sp"/>
+
+        <TextView
+            android:id="@+id/tvTotal"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Total: -- Mbps"
+            android:textColor="#ffb74d"
+            android:textSize="14sp"
+            android:textStyle="bold"/>
+    </LinearLayout>
+
+    <!-- Temp row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
+
+        <TextView
+            android:id="@+id/tvTemp0"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="phy0: --°C"
+            android:textColor="#ef5350"
+            android:textSize="14sp"/>
+
+        <TextView
+            android:id="@+id/tvTemp1"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="phy1: --°C"
+            android:textColor="#ff8a65"
+            android:textSize="14sp"/>
+    </LinearLayout>
+
+    <!-- Chart -->
+    <com.wifithermal.ChartView
+        android:id="@+id/chartView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button -->
+    <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="48dp"
         android:text="Start Test"
-        android:textSize="18sp"
-        android:layout_marginBottom="24dp"/>
-
-    <TextView
-        android:id="@+id/tvStatus"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Ready"
         android:textSize="16sp"
-        android:layout_marginBottom="8dp"/>
-
-    <TextView
-        android:id="@+id/tvTime"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Time: --"
-        android:textSize="20sp"
-        android:layout_marginBottom="8dp"/>
-
-    <TextView
-        android:id="@+id/tvSendRate"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="TX: -- MB/s"
-        android:textSize="20sp"
-        android:textColor="#1565C0"
-        android:layout_marginBottom="4dp"/>
-
-    <TextView
-        android:id="@+id/tvRecvRate"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="RX: -- MB/s"
-        android:textSize="20sp"
-        android:textColor="#2E7D32"
-        android:layout_marginBottom="4dp"/>
-
-    <TextView
-        android:id="@+id/tvTotalRate"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Total: -- MB/s"
-        android:textSize="24sp"
-        android:textStyle="bold"
-        android:textColor="#E65100"/>
+        android:backgroundTint="#3f51b5"/>
 
 </LinearLayout>

@@ -1,59 +1,51 @@
 # AI Context - WiFi Thermal Test 项目记忆文件
 
-> 此文件供 AI 快速理解项目背景，人类也可阅读。
-
 ## 项目目的
+测试 mt7915 无线网卡在不同散热片方案下的散热效果。手机持续跑满WiFi带宽，同时采集网卡温度，实时在手机上绘制曲线，测试结束服务端生成 PNG+CSV 归档。
 
-测试 **mt7915 无线网卡**在不同散热片方案下的散热效果。
-通过让手机持续跑满WiFi带宽，同时采集网卡温度，生成温度+速率随时间变化的双曲线图，量化散热差异。
-
-## 关键节点 IP
-
+## 关键节点
 | 角色 | IP | 备注 |
 |------|----|------|
-| 宿主机（server.py所在） | 192.168.63.178 | Debian 13，SSH端口40022，root/z052500Z |
-| iStoreOS路由器 | 192.168.10.1 | mt7915网卡在此，SSH无密码 |
+| 宿主机（server.py） | 192.168.63.178 | Debian 13，SSH端口40022，root/z052500Z |
+| iStoreOS路由器 | 192.168.10.1 | mt7915网卡，SSH无密码，sensors读温度 |
 | 手机 | DHCP | 连iStoreOS WiFi |
 
-## 数据流
+## 端口
+| 端口 | 用途 |
+|------|------|
+| 5555 (TCP) | 控制连接：握手 + 服务端每秒推送STAT行 |
+| 5556 (TCP) | 数据连接：8条并行流双向收发，跑满带宽 |
 
-```
-手机 --[TCP 5555]--> 宿主机server.py --[SSH每秒]--> iStoreOS sensors
-       双向1MB块持续收发               采集temp并统计速率
-                                       测试结束生成PNG+CSV
-```
+## 协议
+1. 手机 → 服务端 控制连接(5555)：`START:<秒数>\n`
+2. 服务端 → 手机：`OK\n`
+3. 手机同时建立8条数据连接(5556)，双向发512KB块
+4. 服务端每秒SSH读温度，统计速率，推送：`STAT:<elapsed>:<t0>:<t1>:<tx_mbps>:<rx_mbps>\n`
+5. 手机实时绘制温度+速率曲线
+6. 测试结束服务端发 `END\n`，生成PNG+CSV
 
-## 协议握手
+## 单位
+- 速率：**Mbps**（bits，不是bytes）= bytes × 8 / 1_000_000
 
-1. 手机发：`START:<秒数>\n`
-2. 服务端回：`OK\n`
-3. 双方开始持续双向发送 1MB 随机数据块
-4. 时间到后服务端停止，生成图表
-
-## 图表内容
-
-- X轴：时间（分钟）
-- 左Y轴（红）：mt7915 phy0 / phy1 温度（°C）
-- 右Y轴（蓝）：总吞吐速率（MB/s）
-- 文件名：`thermal_test_YYYYMMDD_HHMMSS.png`
+## 图表（手机实时）
+- X轴：时间（秒，按总时长自动缩放）
+- 左侧标注：温度°C（红色）
+- 右侧标注：速率 Mbps（蓝色）
+- 曲线：phy0温度(红实线) / phy1温度(橙虚线) / 总速率(蓝实线)
 
 ## 文件位置
-
-- 服务端代码：`/root/server.py`（宿主机）
+- 服务端：`/root/server.py`（宿主机）
 - 日志：`/root/server.log`
-- 结果图表：`/root/thermal_test_*.png`
+- 结果：`/root/thermal_test_*.png` / `*.csv`
 - APK：项目根目录 `WifiThermalTest.apk`
 
+## 重启服务端
+```bash
+pkill -f server.py && nohup python3 /root/server.py > /root/server.log 2>&1 &
+```
+
 ## Android App
-
 - 包名：`com.wifithermal`
-- 主Activity：`MainActivity.java`
-- 单Activity，无第三方依赖
-- 两个后台线程：sender / receiver，主线程每秒更新UI
-
-## 已知问题 / 注意事项
-
-- 宿主机需能免密SSH到 192.168.10.1，否则温度读取失败（返回0）
-- `nohup python3 /root/server.py > /root/server.log 2>&1 &` 后台启动
-- 重启：`pkill -f server.py && nohup python3 /root/server.py > /root/server.log 2>&1 &`
-- 服务端口 5555，未做systemd服务，手动管理
+- MainActivity.java：控制流+数据流管理，UI更新
+- ChartView.java：自定义View，实时绘制双Y轴曲线
+- minSdk 24 (Android 7.0+)
