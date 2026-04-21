@@ -7,7 +7,8 @@
         android:allowBackup="true"
         android:label="WiFi Thermal Test"
         android:theme="@style/Theme.MaterialComponents.Light.DarkActionBar"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true">
         <activity
             android:name=".MainActivity"
             android:exported="true">
