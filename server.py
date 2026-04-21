@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""WiFi Thermal Test Server
-Control port 5555: handshake + stats push
-Data port    5556: N parallel bidirectional streams
+"""
+WiFi Thermal Test Server
+- 启动 iperf3 -s 处理实际数据传输（原生速度）
+- 控制端口 5555：接收 App 连接，每秒 push 温度数据
+- 测试结束生成 PNG + CSV（速率从 iperf3 JSON 解析）
 """
 
 import socket
@@ -11,28 +13,23 @@ import csv
 import os
 import subprocess
 import signal
+import json
 from datetime import datetime
 from collections import deque
 
-CONTROL_PORT = 5555
-DATA_PORT = 5556
-NUM_STREAMS = 16
-BUFFER_SIZE = 1024 * 1024
-ISTOREOS_IP = "192.168.10.1"
+CONTROL_PORT  = 5555
+IPERF_PORT    = 5201
+ISTOREOS_IP   = "192.168.10.1"
 SAMPLE_INTERVAL = 1
-SMOOTH_WINDOW = 3   # sliding average window (seconds)
+SMOOTH_WINDOW   = 3
 
-lock = threading.Lock()
-total_bytes_sent = 0
-total_bytes_recv = 0
-bytes_sent_last = 0
-bytes_recv_last = 0
-log_data = []
-running = False
-test_start_time = 0
+running       = False
+test_start    = 0
 test_duration = 0
-data_sockets = []
-ctrl_sock = None
+ctrl_sock     = None
+iperf_proc    = None
+log_data      = []
+lock          = threading.Lock()
 
 
 def get_temperature():
@@ -55,101 +52,81 @@ def get_temperature():
         return [0.0, 0.0]
 
 
-def to_mbps(bytes_count):
-    """bytes → Mbps (megabits per second, small b)"""
-    return bytes_count * 8 / 1_000_000
+def start_iperf_server():
+    """启动 iperf3 server，测试结束后收集 JSON 结果"""
+    global iperf_proc
+    try:
+        iperf_proc = subprocess.Popen(
+            ["iperf3", "-s", "-p", str(IPERF_PORT), "-J", "--forceflush", "-1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print(f"[INFO] iperf3 server started, pid={iperf_proc.pid}")
+    except Exception as e:
+        print(f"[ERROR] iperf3 start failed: {e}")
+        iperf_proc = None
 
 
-def stream_sender(sock):
-    global total_bytes_sent, running
-    data = os.urandom(BUFFER_SIZE)
-    while running:
-        try:
-            n = sock.send(data)
-            with lock:
-                total_bytes_sent += n
-        except:
-            break
+def monitor_thread():
+    """每秒读温度，推送给 App，记录日志"""
+    global running, ctrl_sock
 
-
-def stream_receiver(sock):
-    global total_bytes_recv, running
-    buf = bytearray(BUFFER_SIZE)
-    while running:
-        try:
-            n = sock.recv_into(buf)
-            if not n:
-                break
-            with lock:
-                total_bytes_recv += n
-        except:
-            break
-
-
-def monitor_thread(output_dir):
-    global running, bytes_sent_last, bytes_recv_last
-    global total_bytes_sent, total_bytes_recv
-
-    tx_window = deque(maxlen=SMOOTH_WINDOW)
-    rx_window = deque(maxlen=SMOOTH_WINDOW)
+    temp_window = deque(maxlen=SMOOTH_WINDOW)
 
     while running:
         time.sleep(SAMPLE_INTERVAL)
         if not running:
             break
 
-        elapsed = time.time() - test_start_time
+        elapsed = time.time() - test_start
+        temps   = get_temperature()
+        t0      = temps[0]
+        t1      = temps[1] if len(temps) > 1 else temps[0]
+        temp_window.append((t0, t1))
+
         with lock:
-            s_now = total_bytes_sent
-            r_now = total_bytes_recv
+            log_data.append({
+                'elapsed':   round(elapsed, 1),
+                'temp_phy0': t0,
+                'temp_phy1': t1,
+                'total_mbps': 0,  # filled later from iperf3 JSON
+            })
 
-        delta_s = s_now - bytes_sent_last
-        delta_r = r_now - bytes_recv_last
-        bytes_sent_last = s_now
-        bytes_recv_last = r_now
+        print(f"[{elapsed:6.1f}s] Temp: {t0}°C / {t1}°C")
 
-        tx_window.append(to_mbps(delta_s))
-        rx_window.append(to_mbps(delta_r))
-
-        # Smoothed values
-        tx_mbps = sum(tx_window) / len(tx_window)
-        rx_mbps = sum(rx_window) / len(rx_window)
-        total_mbps = tx_mbps + rx_mbps
-
-        temps = get_temperature()
-        t0 = temps[0]
-        t1 = temps[1] if len(temps) > 1 else temps[0]
-
-        entry = {
-            'elapsed': round(elapsed, 1),
-            'temp_phy0': t0,
-            'temp_phy1': t1,
-            'tx_mbps': round(tx_mbps, 1),
-            'rx_mbps': round(rx_mbps, 1),
-            'total_mbps': round(total_mbps, 1),
-        }
-        log_data.append(entry)
-        print(f"[{elapsed:6.1f}s] Temp: {t0}°C/{t1}°C | "
-              f"TX: {tx_mbps:.0f} Mbps  RX: {rx_mbps:.0f} Mbps  Total: {total_mbps:.0f} Mbps")
-
-        stat_line = f"STAT:{elapsed:.1f}:{t0}:{t1}:{tx_mbps:.1f}:{rx_mbps:.1f}\n"
+        stat_line = f"STAT:{elapsed:.1f}:{t0}:{t1}:0:0\n"
         try:
             if ctrl_sock:
                 ctrl_sock.sendall(stat_line.encode())
         except:
             pass
 
-        if test_duration > 0 and elapsed >= test_duration:
-            print(f"\n[INFO] Duration {test_duration}s reached.")
-            stop_test()
+        if test_duration > 0 and elapsed >= test_duration + 5:
+            print("[INFO] Monitor done")
             break
 
-    generate_output(output_dir)
+
+def collect_iperf_result():
+    """等待 iperf3 进程退出，解析 JSON 结果填充速率"""
+    global iperf_proc
+    if not iperf_proc:
+        return
+
+    try:
+        stdout, _ = iperf_proc.communicate(timeout=30)
+        data = json.loads(stdout.decode())
+        intervals = data.get("intervals", [])
+        for i, iv in enumerate(intervals):
+            mbps = iv["sum"]["bits_per_second"] / 1_000_000
+            # Match to log_data by elapsed time
+            if i < len(log_data):
+                log_data[i]['total_mbps'] = round(mbps, 1)
+        print(f"[INFO] iperf3 result parsed, {len(intervals)} intervals")
+    except Exception as e:
+        print(f"[WARN] iperf3 result parse: {e}")
 
 
 def generate_output(output_dir):
     if not log_data:
-        print("[WARN] No data to save")
+        print("[WARN] No data")
         return
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -167,8 +144,8 @@ def generate_output(output_dir):
         import matplotlib.pyplot as plt
 
         times = [d['elapsed'] / 60 for d in log_data]
-        t0 = [d['temp_phy0'] for d in log_data]
-        t1 = [d['temp_phy1'] for d in log_data]
+        t0    = [d['temp_phy0'] for d in log_data]
+        t1    = [d['temp_phy1'] for d in log_data]
         rates = [d['total_mbps'] for d in log_data]
 
         fig, ax1 = plt.subplots(figsize=(14, 6))
@@ -182,7 +159,7 @@ def generate_output(output_dir):
 
         ax2 = ax1.twinx()
         ax2.set_ylabel('Throughput (Mbps)', color='blue')
-        ax2.plot(times, rates, 'b-', label='Total (Mbps)', linewidth=1.5, alpha=0.8)
+        ax2.plot(times, rates, 'b-', label='Total (Mbps)', linewidth=1.5)
         ax2.tick_params(axis='y', labelcolor='blue')
         ax2.legend(loc='upper right')
 
@@ -193,30 +170,24 @@ def generate_output(output_dir):
         plt.close()
         print(f"[OK] Chart: {chart_path}")
     except Exception as e:
-        print(f"[WARN] Chart failed: {e}")
-
-
-def stop_test():
-    global running, data_sockets, ctrl_sock
-    running = False
-    for s in data_sockets:
-        try: s.close()
-        except: pass
-    try:
-        if ctrl_sock: ctrl_sock.send(b"END\n")
-    except: pass
+        print(f"[WARN] Chart: {e}")
 
 
 def main():
-    global running, test_start_time, test_duration, ctrl_sock
-    global total_bytes_sent, total_bytes_recv, bytes_sent_last, bytes_recv_last
-    global log_data, data_sockets
+    global running, test_start, test_duration, ctrl_sock, log_data, iperf_proc
 
     output_dir = os.path.dirname(os.path.abspath(__file__))
 
     def sig_handler(sig, frame):
         print("\n[INFO] Stopping...")
-        stop_test()
+        global running
+        running = False
+        if iperf_proc:
+            iperf_proc.terminate()
+        if ctrl_sock:
+            try: ctrl_sock.close()
+            except: pass
+
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
@@ -225,90 +196,71 @@ def main():
     ctrl_server.bind(('0.0.0.0', CONTROL_PORT))
     ctrl_server.listen(1)
 
-    data_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    data_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    data_server.bind(('0.0.0.0', DATA_PORT))
-    data_server.listen(NUM_STREAMS + 2)
-
     print(f"[INFO] WiFi Thermal Test Server")
-    print(f"[INFO] Control: :{CONTROL_PORT}  Data: :{DATA_PORT}  Streams: {NUM_STREAMS}")
-    print(f"[INFO] Temp source: {ISTOREOS_IP}")
+    print(f"[INFO] Control port: {CONTROL_PORT}")
+    print(f"[INFO] iperf3 port:  {IPERF_PORT}")
+    print(f"[INFO] Temp source:  {ISTOREOS_IP}")
 
     while True:
-        running = False
-        total_bytes_sent = 0
-        total_bytes_recv = 0
-        bytes_sent_last = 0
-        bytes_recv_last = 0
-        log_data = []
-        data_sockets = []
+        running       = False
+        log_data      = []
+        iperf_proc    = None
 
-        print(f"\n[INFO] Waiting for client...")
+        print(f"\n[INFO] Waiting for App connection on :{CONTROL_PORT} ...")
         try:
             ctrl_sock, addr = ctrl_server.accept()
         except:
             break
 
-        print(f"[INFO] Client: {addr}")
+        print(f"[INFO] App connected: {addr}")
         ctrl_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+        # Handshake
         try:
             cmd = b""
             while b"\n" not in cmd:
                 cmd += ctrl_sock.recv(256)
             cmd = cmd.decode().strip()
-            if not cmd.startswith("START:"):
+            if cmd.startswith("START:"):
+                test_duration = int(cmd.split(":")[1])
+                print(f"[INFO] Duration: {test_duration}s")
+                ctrl_sock.sendall(b"OK\n")
+            else:
                 ctrl_sock.close()
                 continue
-            test_duration = int(cmd.split(":")[1])
-            print(f"[INFO] Duration: {test_duration}s, waiting for {NUM_STREAMS} data streams...")
-            ctrl_sock.sendall(b"OK\n")
         except Exception as e:
             print(f"[ERROR] Handshake: {e}")
             ctrl_sock.close()
             continue
 
-        data_server.settimeout(10)
-        accepted = 0
-        while accepted < NUM_STREAMS:
-            try:
-                ds, da = data_server.accept()
-                ds.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4*1024*1024)
-                ds.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4*1024*1024)
-                ds.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                data_sockets.append(ds)
-                accepted += 1
-                print(f"[INFO] Data stream {accepted}/{NUM_STREAMS}: {da}")
-            except socket.timeout:
-                print(f"[WARN] Only {accepted} streams, proceeding")
-                break
+        # Start iperf3 server (accepts 1 test then exits)
+        start_iperf_server()
 
-        if not data_sockets:
-            print("[ERROR] No data streams")
-            ctrl_sock.close()
-            continue
+        # Start test
+        running    = True
+        test_start = time.time()
 
-        running = True
-        test_start_time = time.time()
-
-        for ds in data_sockets:
-            threading.Thread(target=stream_sender, args=(ds,), daemon=True).start()
-            threading.Thread(target=stream_receiver, args=(ds,), daemon=True).start()
-
-        tm = threading.Thread(target=monitor_thread, args=(output_dir,), daemon=True)
+        tm = threading.Thread(target=monitor_thread, daemon=True)
         tm.start()
-        tm.join()
+
+        # Wait for iperf3 to finish
+        if iperf_proc:
+            iperf_proc.wait()
+            print("[INFO] iperf3 done")
+            collect_iperf_result()
 
         running = False
-        for s in data_sockets:
-            try: s.close()
-            except: pass
+        tm.join(timeout=5)
+
+        try: ctrl_sock.sendall(b"END\n")
+        except: pass
         try: ctrl_sock.close()
         except: pass
-        print("[INFO] Test done.")
+
+        generate_output(output_dir)
+        print("[INFO] Test complete.")
 
     ctrl_server.close()
-    data_server.close()
 
 
 if __name__ == '__main__':
