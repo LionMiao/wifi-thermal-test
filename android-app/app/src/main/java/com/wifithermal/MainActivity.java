@@ -66,10 +66,9 @@ public class MainActivity extends AppCompatActivity {
 
         iperfRunner = new IperfRunner(this);
         try {
-            iperfRunner.install(this);
-            tvStatus.setText("Ready");
+            
+            if (iperfRunner.isAvailable()) tvStatus.setText("Ready"); else tvStatus.setText("iperf3 not found: " + iperfRunner.getBinaryPath());
         } catch (Exception e) {
-            tvStatus.setText("Install failed: " + e.getMessage());
         }
 
         btnStart.setOnClickListener(v -> {

@@ -5,47 +5,39 @@ import android.util.Log;
 import java.io.*;
 
 /**
- * Manages the iperf3 ARM64 binary:
- * - copies from assets to app's files dir on first run
- * - executes iperf3 client and streams output line by line
+ * Runs iperf3 binary (packaged as libiperf3.so in jniLibs/arm64-v8a).
+ * Android allows executing from nativeLibraryDir.
  */
 public class IperfRunner {
     private static final String TAG = "IperfRunner";
-    private static final String BINARY_NAME = "iperf3";
 
     private final File binaryFile;
-    private Process process;
+    private volatile Process process;
 
     public interface LineCallback {
-        /** Called for each line of iperf3 stdout */
         void onLine(String line);
-        /** Called when iperf3 exits */
         void onDone(int exitCode);
     }
 
     public IperfRunner(Context ctx) {
-        binaryFile = new File(ctx.getFilesDir(), BINARY_NAME);
+        // nativeLibraryDir is the only place Android allows exec from
+        File nativeDir = new File(ctx.getApplicationInfo().nativeLibraryDir);
+        binaryFile = new File(nativeDir, "libiperf3.so");
+        Log.i(TAG, "iperf3 path: " + binaryFile.getAbsolutePath()
+                + " exists=" + binaryFile.exists()
+                + " exec=" + binaryFile.canExecute());
     }
 
-    /** Copy iperf3 from assets if not already present */
-    public void install(Context ctx) throws IOException {
-        if (binaryFile.exists() && binaryFile.canExecute()) return;
-        try (InputStream in = ctx.getAssets().open(BINARY_NAME);
-             FileOutputStream out = new FileOutputStream(binaryFile)) {
-            byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-        }
-        if (!binaryFile.setExecutable(true, false)) {
-            throw new IOException("Cannot set iperf3 executable");
-        }
-        Log.i(TAG, "iperf3 installed to " + binaryFile.getAbsolutePath());
+    public boolean isAvailable() {
+        return binaryFile.exists() && binaryFile.canExecute();
+    }
+
+    public String getBinaryPath() {
+        return binaryFile.getAbsolutePath();
     }
 
     /**
-     * Run iperf3 client:
-     * iperf3 -c <host> -p <port> -t <duration> -P <parallel> --forceflush -f m
-     * Calls callback.onLine() for each output line.
+     * iperf3 -c host -p port -t duration -P parallel --forceflush -f m -i 1
      */
     public void runClient(String host, int port, int duration, int parallel,
                           LineCallback callback) {
@@ -58,9 +50,10 @@ public class IperfRunner {
                     "-t", String.valueOf(duration),
                     "-P", String.valueOf(parallel),
                     "--forceflush",
-                    "-f", "m",           // output in Mbits/s
-                    "-i", "1",           // 1-second intervals
+                    "-f", "m",
+                    "-i", "1",
                 };
+                Log.i(TAG, "Running: " + String.join(" ", cmd));
                 ProcessBuilder pb = new ProcessBuilder(cmd);
                 pb.redirectErrorStream(true);
                 process = pb.start();
@@ -69,20 +62,20 @@ public class IperfRunner {
                     new InputStreamReader(process.getInputStream()));
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    Log.d(TAG, line);
                     callback.onLine(line);
                 }
-                int exitCode = process.waitFor();
-                callback.onDone(exitCode);
+                int code = process.waitFor();
+                callback.onDone(code);
             } catch (Exception e) {
-                Log.e(TAG, "iperf3 error", e);
+                Log.e(TAG, "iperf3 run error", e);
+                callback.onLine("ERROR: " + e.getMessage());
                 callback.onDone(-1);
             }
         }, "iperf3-runner").start();
     }
 
     public void stop() {
-        if (process != null) {
-            process.destroy();
-        }
+        if (process != null) process.destroy();
     }
 }
