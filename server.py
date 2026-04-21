@@ -16,8 +16,8 @@ from collections import deque
 
 CONTROL_PORT = 5555
 DATA_PORT = 5556
-NUM_STREAMS = 8
-BUFFER_SIZE = 512 * 1024
+NUM_STREAMS = 16
+BUFFER_SIZE = 1024 * 1024
 ISTOREOS_IP = "192.168.10.1"
 SAMPLE_INTERVAL = 1
 SMOOTH_WINDOW = 3   # sliding average window (seconds)

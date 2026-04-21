@@ -16,8 +16,8 @@ import java.util.Locale;
 public class MainActivity extends AppCompatActivity {
 
     static final int DATA_PORT = 5556;
-    static final int NUM_STREAMS = 8;
-    static final int STREAM_BUF = 512 * 1024;
+    static final int NUM_STREAMS = 16;
+    static final int STREAM_BUF = 1024 * 1024;
     static final int SMOOTH_WINDOW = 3; // sliding average seconds
 
     private EditText etIp, etPort, etDuration;
