@@ -12,15 +12,16 @@ import os
 import subprocess
 import signal
 from datetime import datetime
+from collections import deque
 
 CONTROL_PORT = 5555
 DATA_PORT = 5556
-NUM_STREAMS = 8          # expected parallel data connections
-BUFFER_SIZE = 512 * 1024 # 512KB per stream
+NUM_STREAMS = 8
+BUFFER_SIZE = 512 * 1024
 ISTOREOS_IP = "192.168.10.1"
 SAMPLE_INTERVAL = 1
+SMOOTH_WINDOW = 3   # sliding average window (seconds)
 
-# shared state
 lock = threading.Lock()
 total_bytes_sent = 0
 total_bytes_recv = 0
@@ -55,6 +56,7 @@ def get_temperature():
 
 
 def to_mbps(bytes_count):
+    """bytes → Mbps (megabits per second, small b)"""
     return bytes_count * 8 / 1_000_000
 
 
@@ -88,6 +90,9 @@ def monitor_thread(output_dir):
     global running, bytes_sent_last, bytes_recv_last
     global total_bytes_sent, total_bytes_recv
 
+    tx_window = deque(maxlen=SMOOTH_WINDOW)
+    rx_window = deque(maxlen=SMOOTH_WINDOW)
+
     while running:
         time.sleep(SAMPLE_INTERVAL)
         if not running:
@@ -103,8 +108,12 @@ def monitor_thread(output_dir):
         bytes_sent_last = s_now
         bytes_recv_last = r_now
 
-        tx_mbps = to_mbps(delta_s)
-        rx_mbps = to_mbps(delta_r)
+        tx_window.append(to_mbps(delta_s))
+        rx_window.append(to_mbps(delta_r))
+
+        # Smoothed values
+        tx_mbps = sum(tx_window) / len(tx_window)
+        rx_mbps = sum(rx_window) / len(rx_window)
         total_mbps = tx_mbps + rx_mbps
 
         temps = get_temperature()
@@ -121,9 +130,8 @@ def monitor_thread(output_dir):
         }
         log_data.append(entry)
         print(f"[{elapsed:6.1f}s] Temp: {t0}°C/{t1}°C | "
-              f"TX: {tx_mbps:.0f} Mbps RX: {rx_mbps:.0f} Mbps Total: {total_mbps:.0f} Mbps")
+              f"TX: {tx_mbps:.0f} Mbps  RX: {rx_mbps:.0f} Mbps  Total: {total_mbps:.0f} Mbps")
 
-        # Push stats to client on control socket
         stat_line = f"STAT:{elapsed:.1f}:{t0}:{t1}:{tx_mbps:.1f}:{rx_mbps:.1f}\n"
         try:
             if ctrl_sock:
@@ -146,7 +154,6 @@ def generate_output(output_dir):
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # CSV
     csv_path = os.path.join(output_dir, f'thermal_test_{timestamp}.csv')
     with open(csv_path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=log_data[0].keys())
@@ -154,7 +161,6 @@ def generate_output(output_dir):
         w.writerows(log_data)
     print(f"[OK] CSV: {csv_path}")
 
-    # Chart
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -214,13 +220,11 @@ def main():
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
-    # Control server
     ctrl_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ctrl_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     ctrl_server.bind(('0.0.0.0', CONTROL_PORT))
     ctrl_server.listen(1)
 
-    # Data server
     data_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     data_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     data_server.bind(('0.0.0.0', DATA_PORT))
@@ -231,7 +235,6 @@ def main():
     print(f"[INFO] Temp source: {ISTOREOS_IP}")
 
     while True:
-        # Reset state
         running = False
         total_bytes_sent = 0
         total_bytes_recv = 0
@@ -240,7 +243,7 @@ def main():
         log_data = []
         data_sockets = []
 
-        print(f"\n[INFO] Waiting for client on control port...")
+        print(f"\n[INFO] Waiting for client...")
         try:
             ctrl_sock, addr = ctrl_server.accept()
         except:
@@ -249,7 +252,6 @@ def main():
         print(f"[INFO] Client: {addr}")
         ctrl_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        # Handshake
         try:
             cmd = b""
             while b"\n" not in cmd:
@@ -266,38 +268,32 @@ def main():
             ctrl_sock.close()
             continue
 
-        # Accept N data connections
         data_server.settimeout(10)
         accepted = 0
         while accepted < NUM_STREAMS:
             try:
                 ds, da = data_server.accept()
-                ds.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2*1024*1024)
-                ds.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2*1024*1024)
+                ds.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4*1024*1024)
+                ds.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4*1024*1024)
                 ds.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 data_sockets.append(ds)
                 accepted += 1
                 print(f"[INFO] Data stream {accepted}/{NUM_STREAMS}: {da}")
             except socket.timeout:
-                print(f"[WARN] Only {accepted} streams connected, proceeding anyway")
+                print(f"[WARN] Only {accepted} streams, proceeding")
                 break
 
         if not data_sockets:
-            print("[ERROR] No data streams, aborting")
+            print("[ERROR] No data streams")
             ctrl_sock.close()
             continue
 
-        # Start test
         running = True
         test_start_time = time.time()
-        threads = []
 
         for ds in data_sockets:
-            t1 = threading.Thread(target=stream_sender, args=(ds,), daemon=True)
-            t2 = threading.Thread(target=stream_receiver, args=(ds,), daemon=True)
-            t1.start()
-            t2.start()
-            threads.extend([t1, t2])
+            threading.Thread(target=stream_sender, args=(ds,), daemon=True).start()
+            threading.Thread(target=stream_receiver, args=(ds,), daemon=True).start()
 
         tm = threading.Thread(target=monitor_thread, args=(output_dir,), daemon=True)
         tm.start()
